@@ -242,46 +242,62 @@ export async function fetchCreatorContentTypeMap(accessToken, channelId) {
   const endDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const startDate = '2005-02-14'; // YouTube 成立日，安全下界
 
+  // creatorContentType 不能跟 video 併成 dimension（不支援），只能當 filter。
+  // 所以每種類型各查一次：dimensions=video + filters=creatorContentType==<type>
   const typeMap = new Map();
   const PAGE_SIZE = 200;
-  const MAX_PAGES = 100; // 安全上限（最多 20000 支）
-  let startIndex = 1; // Analytics startIndex 為 1-based
-  let page = 0;
+  const MAX_PAGES = 100; // 每種類型安全上限
+  const TYPES = ['shorts', 'videoOnDemand', 'liveStream'];
 
-  while (page < MAX_PAGES) {
-    page++;
-    const response = await youtubeAnalytics.reports.query({
-      ids: `channel==${channelId}`,
-      startDate,
-      endDate,
-      dimensions: 'video,creatorContentType',
-      metrics: 'views',
-      sort: '-views',
-      maxResults: PAGE_SIZE,
-      startIndex,
-    });
+  for (const type of TYPES) {
+    let startIndex = 1; // Analytics startIndex 為 1-based
+    let page = 0;
+    let typeTotal = 0;
 
-    recordQuotaServer('youtubeAnalytics.reports.query', 1, {
-      dimensions: 'video,creatorContentType',
-      page,
-      context: 'videoCache:fetchCreatorContentTypeMap',
-      caller: 'videoCacheService.fetchCreatorContentTypeMap',
-    });
-
-    const rows = response.data.rows || [];
-    // 每列格式：[videoId, creatorContentType, views]
-    for (const row of rows) {
-      const videoId = row[0];
-      const type = row[1];
-      if (videoId && type && !typeMap.has(videoId)) {
-        typeMap.set(videoId, type);
+    while (page < MAX_PAGES) {
+      page++;
+      let response;
+      try {
+        response = await youtubeAnalytics.reports.query({
+          ids: `channel==${channelId}`,
+          startDate,
+          endDate,
+          dimensions: 'video',
+          filters: `creatorContentType==${type}`,
+          metrics: 'views',
+          sort: '-views',
+          maxResults: PAGE_SIZE,
+          startIndex,
+        });
+      } catch (err) {
+        // 某些類型（例如頻道從沒直播）可能整個不支援 → 略過，不中斷其他類型
+        console.log(`[VideoCache] ⚠️  類型 ${type} 查詢失敗（略過）：${err.message}`);
+        break;
       }
+
+      recordQuotaServer('youtubeAnalytics.reports.query', 1, {
+        dimensions: 'video',
+        filters: `creatorContentType==${type}`,
+        page,
+        context: 'videoCache:fetchCreatorContentTypeMap',
+        caller: 'videoCacheService.fetchCreatorContentTypeMap',
+      });
+
+      const rows = response.data.rows || [];
+      // 每列格式：[videoId, views]
+      for (const row of rows) {
+        const videoId = row[0];
+        if (videoId && !typeMap.has(videoId)) {
+          typeMap.set(videoId, type);
+          typeTotal++;
+        }
+      }
+
+      if (rows.length < PAGE_SIZE) break; // 最後一頁
+      startIndex += PAGE_SIZE;
     }
 
-    console.log(`[VideoCache] 📄 第 ${page} 頁：${rows.length} 列，累計已標記 ${typeMap.size} 支`);
-
-    if (rows.length < PAGE_SIZE) break; // 最後一頁
-    startIndex += PAGE_SIZE;
+    console.log(`[VideoCache] 🏷️  ${type}: ${typeTotal} 支`);
   }
 
   console.log(`[VideoCache] ✅ Analytics 類型抓取完成，共標記 ${typeMap.size} 支影片`);
