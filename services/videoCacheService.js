@@ -216,22 +216,33 @@ export async function fetchAllVideoTitles(accessToken, channelId) {
 }
 
 /**
- * 從 YouTube Analytics API 取得每支影片的 creatorContentType（shorts / videoOnDemand / …）
+ * 從 YouTube Analytics API 取得每支影片的 creatorContentType（shorts / videoOnDemand / liveStream）
  *
- * 用 dimensions=video,creatorContentType 分頁把整個頻道列一遍，回傳 videoId → type 的 Map。
- * 注意：Analytics 只會回「日期範圍內有觀看數」的影片，且列數有上限，
- * 沒被涵蓋到的影片不會出現在 Map 裡（呼叫端應標記為 'unknown'）。
+ * 背景：Analytics 的 video 報表有兩個限制——
+ *   1. creatorContentType 不能當 dimension（只能當 filter）
+ *   2. 單一查詢最多回 200 列、且不支援 startIndex 分頁
+ * 所以無法「一次列完整個頻道」。作法改為：把已知的 videoId 每 200 個一批，
+ * 每批用 filters=video==<這批ID>;creatorContentType==<type> 查，
+ * 因為每批限定 ≤200 個已知 ID，永遠碰不到 200 上限 → 全量覆蓋。
+ *
+ * 注意：Analytics 只回「日期範圍內有觀看數」的影片，所以零觀看數的影片仍不會出現，
+ * 呼叫端應把 Map 裡沒有的標記為 'unknown'。
  *
  * 成本：youtubeAnalytics.reports.query 每次 1 單位（獨立於 Data API 的每日 10k 額度）。
  *
  * @param {string} accessToken - YouTube OAuth access token（需 yt-analytics.readonly scope）
  * @param {string} channelId - 頻道 ID
+ * @param {string[]} videoIds - 要查詢類型的影片 ID 清單
  * @returns {Promise<Map<string, string>>} videoId → creatorContentType
  */
-export async function fetchCreatorContentTypeMap(accessToken, channelId) {
+export async function fetchCreatorContentTypeMap(accessToken, channelId, videoIds = []) {
   console.log('[VideoCache] ========================================');
   console.log('[VideoCache] 🏷️  透過 Analytics 取得 creatorContentType');
   console.log('[VideoCache] ========================================');
+  console.log(`[VideoCache] 待查影片數: ${videoIds.length}`);
+
+  const typeMap = new Map();
+  if (videoIds.length === 0) return typeMap;
 
   const oauth2Client = new google.auth.OAuth2();
   oauth2Client.setCredentials({ access_token: accessToken });
@@ -242,20 +253,17 @@ export async function fetchCreatorContentTypeMap(accessToken, channelId) {
   const endDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const startDate = '2005-02-14'; // YouTube 成立日，安全下界
 
-  // creatorContentType 不能跟 video 併成 dimension（不支援），只能當 filter。
-  // 所以每種類型各查一次：dimensions=video + filters=creatorContentType==<type>
-  const typeMap = new Map();
-  const PAGE_SIZE = 200;
-  const MAX_PAGES = 100; // 每種類型安全上限
+  const BATCH_SIZE = 200; // 每批 ≤200 個 ID，確保單次查詢不會撞到 200 列上限
   const TYPES = ['shorts', 'videoOnDemand', 'liveStream'];
+  const totalBatches = Math.ceil(videoIds.length / BATCH_SIZE);
+  const typeCounts = {};
 
-  for (const type of TYPES) {
-    let startIndex = 1; // Analytics startIndex 為 1-based
-    let page = 0;
-    let typeTotal = 0;
+  for (let i = 0; i < videoIds.length; i += BATCH_SIZE) {
+    const batch = videoIds.slice(i, i + BATCH_SIZE);
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const idFilter = batch.join(',');
 
-    while (page < MAX_PAGES) {
-      page++;
+    for (const type of TYPES) {
       let response;
       try {
         response = await youtubeAnalytics.reports.query({
@@ -263,44 +271,39 @@ export async function fetchCreatorContentTypeMap(accessToken, channelId) {
           startDate,
           endDate,
           dimensions: 'video',
-          filters: `creatorContentType==${type}`,
+          filters: `video==${idFilter};creatorContentType==${type}`,
           metrics: 'views',
-          sort: '-views',
-          maxResults: PAGE_SIZE,
-          startIndex,
+          maxResults: BATCH_SIZE,
         });
       } catch (err) {
-        // 某些類型（例如頻道從沒直播）可能整個不支援 → 略過，不中斷其他類型
-        console.log(`[VideoCache] ⚠️  類型 ${type} 查詢失敗（略過）：${err.message}`);
-        break;
+        // 例如頻道從沒直播，某類型可能不支援 → 略過該類型該批，不中斷整體
+        console.log(`[VideoCache] ⚠️  批次 ${batchNum}/${totalBatches} 類型 ${type} 查詢失敗（略過）：${err.message}`);
+        continue;
       }
 
       recordQuotaServer('youtubeAnalytics.reports.query', 1, {
         dimensions: 'video',
-        filters: `creatorContentType==${type}`,
-        page,
+        filters: `video==(${batch.length});creatorContentType==${type}`,
+        batch: batchNum,
         context: 'videoCache:fetchCreatorContentTypeMap',
         caller: 'videoCacheService.fetchCreatorContentTypeMap',
       });
 
-      const rows = response.data.rows || [];
       // 每列格式：[videoId, views]
-      for (const row of rows) {
+      for (const row of (response.data.rows || [])) {
         const videoId = row[0];
         if (videoId && !typeMap.has(videoId)) {
           typeMap.set(videoId, type);
-          typeTotal++;
+          typeCounts[type] = (typeCounts[type] || 0) + 1;
         }
       }
-
-      if (rows.length < PAGE_SIZE) break; // 最後一頁
-      startIndex += PAGE_SIZE;
     }
 
-    console.log(`[VideoCache] 🏷️  ${type}: ${typeTotal} 支`);
+    console.log(`[VideoCache] 📦 批次 ${batchNum}/${totalBatches} 完成，累計已標記 ${typeMap.size}/${videoIds.length}`);
   }
 
   console.log(`[VideoCache] ✅ Analytics 類型抓取完成，共標記 ${typeMap.size} 支影片`);
+  Object.entries(typeCounts).forEach(([t, n]) => console.log(`[VideoCache] 🏷️  ${t}: ${n}`));
   return typeMap;
 }
 

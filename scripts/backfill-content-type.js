@@ -63,8 +63,9 @@ async function main() {
   const videos = cache.videos || [];
   console.log(`\n📥 現有快取影片數：${videos.length}`);
 
-  // 2. 拿 creatorContentType map
-  const typeMap = await fetchCreatorContentTypeMap(accessToken, CHANNEL_ID);
+  // 2. 拿 creatorContentType map（用現有影片 ID 分批查，確保全量覆蓋）
+  const videoIds = videos.map(v => v.videoId).filter(Boolean);
+  const typeMap = await fetchCreatorContentTypeMap(accessToken, CHANNEL_ID, videoIds);
 
   // 3. 併入，沒涵蓋到的標 unknown
   const counts = {};
