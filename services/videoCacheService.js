@@ -43,7 +43,7 @@ function sanitizeText(text) {
  * 從 YouTube 抓取所有影片的詳細資訊（含統計數據）
  * @param {string} accessToken - YouTube OAuth access token
  * @param {string} channelId - 頻道 ID
- * @returns {Promise<Array>} 影片列表 [{videoId, title, tags, categoryId, viewCount, likeCount, commentCount, publishedAt, thumbnail, privacyStatus}]
+ * @returns {Promise<Array>} 影片列表 [{videoId, title, tags, categoryId, viewCount, likeCount, commentCount, publishedAt, thumbnail, privacyStatus, duration, creatorContentType}]
  */
 export async function fetchAllVideoTitles(accessToken, channelId) {
   try {
@@ -203,6 +203,26 @@ export async function fetchAllVideoTitles(accessToken, channelId) {
     const videoMap = new Map();
     videos.forEach(video => videoMap.set(video.videoId, video));
     const uniqueVideos = Array.from(videoMap.values());
+
+    // 步驟 4: 標記 creatorContentType（shorts / videoOnDemand / liveStream）
+    // 用 Analytics 分批查（獨立額度），沒涵蓋到的標 'unknown'。
+    // 包在 try/catch：即使 Analytics 失敗也不拖垮整個建快取，只是全標 unknown。
+    console.log('[VideoCache] 🏷️  步驟 4: 標記 creatorContentType...');
+    try {
+      const typeMap = await fetchCreatorContentTypeMap(
+        accessToken,
+        channelId,
+        uniqueVideos.map(v => v.videoId)
+      );
+      uniqueVideos.forEach(v => {
+        v.creatorContentType = typeMap.get(v.videoId) || 'unknown';
+      });
+    } catch (typeError) {
+      console.warn(`[VideoCache] ⚠️  creatorContentType 標記失敗，全部標為 unknown：${typeError.message}`);
+      uniqueVideos.forEach(v => {
+        v.creatorContentType = 'unknown';
+      });
+    }
 
     console.log('[VideoCache] ========================================');
     console.log(`[VideoCache] ✅ 抓取完成！總共 ${uniqueVideos.length} 支影片`);
