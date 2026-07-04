@@ -1,0 +1,36 @@
+name: Backfill creatorContentType
+
+# 只補 creatorContentType 到現有 Gist 快取，不重抓影片、不碰 Data API 搜尋額度。
+# 只用到 Analytics API（獨立額度，每頁 1 單位）+ 讀寫 Gist。
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Backfill creatorContentType
+        run: node scripts/backfill-content-type.js
+        env:
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          GITHUB_GIST_TOKEN: ${{ secrets.VIDEO_CACHE_GIST_TOKEN }}
+          GITHUB_GIST_ID: ${{ secrets.VIDEO_CACHE_GIST_ID }}
+          GITHUB_GIST_FILENAME: ${{ secrets.VIDEO_CACHE_GIST_FILENAME }}

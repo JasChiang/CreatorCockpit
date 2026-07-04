@@ -216,6 +216,79 @@ export async function fetchAllVideoTitles(accessToken, channelId) {
 }
 
 /**
+ * 從 YouTube Analytics API 取得每支影片的 creatorContentType（shorts / videoOnDemand / …）
+ *
+ * 用 dimensions=video,creatorContentType 分頁把整個頻道列一遍，回傳 videoId → type 的 Map。
+ * 注意：Analytics 只會回「日期範圍內有觀看數」的影片，且列數有上限，
+ * 沒被涵蓋到的影片不會出現在 Map 裡（呼叫端應標記為 'unknown'）。
+ *
+ * 成本：youtubeAnalytics.reports.query 每次 1 單位（獨立於 Data API 的每日 10k 額度）。
+ *
+ * @param {string} accessToken - YouTube OAuth access token（需 yt-analytics.readonly scope）
+ * @param {string} channelId - 頻道 ID
+ * @returns {Promise<Map<string, string>>} videoId → creatorContentType
+ */
+export async function fetchCreatorContentTypeMap(accessToken, channelId) {
+  console.log('[VideoCache] ========================================');
+  console.log('[VideoCache] 🏷️  透過 Analytics 取得 creatorContentType');
+  console.log('[VideoCache] ========================================');
+
+  const oauth2Client = new google.auth.OAuth2();
+  oauth2Client.setCredentials({ access_token: accessToken });
+  const youtubeAnalytics = google.youtubeAnalytics({ version: 'v2', auth: oauth2Client });
+
+  // endDate = 今天；startDate 給一個早於任何 YouTube 影片的日期以涵蓋整個頻道
+  const today = new Date();
+  const endDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const startDate = '2005-02-14'; // YouTube 成立日，安全下界
+
+  const typeMap = new Map();
+  const PAGE_SIZE = 200;
+  const MAX_PAGES = 100; // 安全上限（最多 20000 支）
+  let startIndex = 1; // Analytics startIndex 為 1-based
+  let page = 0;
+
+  while (page < MAX_PAGES) {
+    page++;
+    const response = await youtubeAnalytics.reports.query({
+      ids: `channel==${channelId}`,
+      startDate,
+      endDate,
+      dimensions: 'video,creatorContentType',
+      metrics: 'views',
+      sort: '-views',
+      maxResults: PAGE_SIZE,
+      startIndex,
+    });
+
+    recordQuotaServer('youtubeAnalytics.reports.query', 1, {
+      dimensions: 'video,creatorContentType',
+      page,
+      context: 'videoCache:fetchCreatorContentTypeMap',
+      caller: 'videoCacheService.fetchCreatorContentTypeMap',
+    });
+
+    const rows = response.data.rows || [];
+    // 每列格式：[videoId, creatorContentType, views]
+    for (const row of rows) {
+      const videoId = row[0];
+      const type = row[1];
+      if (videoId && type && !typeMap.has(videoId)) {
+        typeMap.set(videoId, type);
+      }
+    }
+
+    console.log(`[VideoCache] 📄 第 ${page} 頁：${rows.length} 列，累計已標記 ${typeMap.size} 支`);
+
+    if (rows.length < PAGE_SIZE) break; // 最後一頁
+    startIndex += PAGE_SIZE;
+  }
+
+  console.log(`[VideoCache] ✅ Analytics 類型抓取完成，共標記 ${typeMap.size} 支影片`);
+  return typeMap;
+}
+
+/**
  * 取得正確的 GitHub Authorization header
  * @param {string} token - GitHub token
  * @returns {string} Authorization header 值
