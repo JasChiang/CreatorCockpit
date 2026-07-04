@@ -296,7 +296,7 @@ app.use('/images', express.static(IMAGES_DIR));
 app.get('/app-config.js', (_req, res) => {
   const cfg = {
     YOUTUBE_CLIENT_ID: process.env.YOUTUBE_CLIENT_ID || null,
-    YOUTUBE_SCOPES: 'https://www.googleapis.com/auth/youtube',
+    YOUTUBE_SCOPES: 'https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/yt-analytics.readonly',
   };
   res.type('application/javascript').send(`window.__APP_CONFIG__ = ${JSON.stringify(cfg)};`);
 });
