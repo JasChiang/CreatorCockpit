@@ -170,6 +170,9 @@ export async function fetchAllVideoTitles(accessToken, channelId) {
         if (statsItem) {
           videos.push({
             ...basicInfo,
+            // search.list 的 publishedAt 有時會偏（實測差幾天，非首播片也會）；videos.list 的 snippet.publishedAt 才是權威發佈日。
+            // 這份資料本來就抓了（part 已含 snippet），用它覆蓋掉步驟1 的偏值，零額外 quota。
+            publishedAt: statsItem.snippet?.publishedAt || basicInfo.publishedAt,
             viewCount: parseInt(statsItem.statistics?.viewCount || '0'),
             likeCount: parseInt(statsItem.statistics?.likeCount || '0'),
             commentCount: parseInt(statsItem.statistics?.commentCount || '0'),
